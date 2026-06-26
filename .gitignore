@@ -1,0 +1,10 @@
+# Rust / Cargo build output
+target/
+**/target/
+Cargo.lock
+
+# Third-party verifier (cloned separately, see scripts/run_demo.sh)
+verifier/
+
+# Local env
+.env
