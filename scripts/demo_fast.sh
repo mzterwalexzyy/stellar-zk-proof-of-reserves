@@ -1,36 +1,44 @@
 #!/usr/bin/env bash
-# Fast demo for the video: uses the already-generated proof, runs the on-chain
-# verification + solvency recording in ~15s (no 4-min re-proving).
+# Compliant Confidential Proof-of-Reserves — full demo on Stellar testnet.
+# Uses the already-generated proof (no 4-min re-proving).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-ROUTER=CDZG66I3HWXFNZW7BKAZH2C4R5BZMCFVBXNVF4IDNRHDL3XYNS44W2Y5
-POR=CCULU6FRJBTG77ZZNEXWYMKMYGEDLLS6746V2ZCZZWT2RM2RHWY7DUGA
+POR=CBVV3KMSJA6JGMWHSODTMZVWQFVCHTHNWH3MVW5ARIJWWBJP2RHWE4KE
 SEAL=$(sed -n '1p' por/proof.txt)
 IMG=$(sed -n '2p' por/proof.txt)
 JOURNAL=$(cat por/journal.hex)
+VIEWKEY=$(cat por/viewkey.hex)
+
+echo "=================================================================="
+echo "  COMPLIANT CONFIDENTIAL PROOF-OF-RESERVES on STELLAR"
+echo "=================================================================="
+echo ""
+echo "  Issuer PRIVATE books (never revealed):"
+echo "     assets 1,350,000  vs  liabilities 1,100,000"
+echo ""
+echo "  >> Submitting the zk proof to Stellar (verifies on-chain)..."
+REC=$(stellar contract invoke --network testnet --source issuer --id "$POR" -- \
+        submit --seal "$SEAL" --image_id "$IMG" --journal "$JOURNAL" 2>/dev/null)
+echo "$REC" | python3 -m json.tool
+ENC=$(echo "$REC" | python3 -c "import sys,json;print(json.load(sys.stdin)['enc_ratio'])")
+TS=$(echo "$REC" | python3 -c "import sys,json;print(json.load(sys.stdin)['statement_ts'])")
 
 echo ""
-echo "=================================================================="
-echo "  CONFIDENTIAL PROOF-OF-RESERVES on STELLAR  (RISC Zero + Soroban)"
-echo "=================================================================="
+echo "  [1] PUBLIC sees only:  solvent = TRUE.  The ratio is ENCRYPTED on-chain."
+echo "      enc_ratio = $ENC   (meaningless without the view key)"
 echo ""
-echo "  Issuer's PRIVATE books (never revealed on-chain):"
-echo "     assets      = [400,000 | 350,000 | 600,000]  ->  1,350,000"
-echo "     liabilities = [200,000 | 500,000 | 400,000]  ->  1,100,000"
+echo "  [2] AUDITOR with the view key decrypts the true ratio:"
+echo -n "      -> "; python3 scripts/auditor_decrypt.py "$VIEWKEY" "$ENC" "$TS"
 echo ""
-echo "  A RISC Zero zkVM proved 'assets >= liabilities' off-chain."
-echo "  Program image_id: ${IMG:0:24}..."
+echo "  [3] CUSTOMER #0 proves their balance was counted (Merkle inclusion):"
+MP=$(python3 scripts/merkle_proof.py 0)
+LEAF=$(echo "$MP" | awk '/^leaf/{print $3}')
+PATH_JSON=$(echo "$MP" | sed -n 's/^path  = //p')
+echo "      leaf = ${LEAF:0:24}...  index = 0"
+echo -n "      on-chain verify_inclusion -> "
+stellar contract invoke --send=no --network testnet --source issuer --id "$POR" -- \
+  verify_inclusion --leaf "$LEAF" --index 0 --path "$PATH_JSON" 2>/dev/null
 echo ""
-echo "  >> Submitting the Groth16 proof to our Stellar contract..."
-echo "     (the contract calls the on-chain RISC Zero verifier to check it)"
-echo ""
-stellar contract invoke --network testnet --source issuer --id "$POR" -- \
-  submit --seal "$SEAL" --image_id "$IMG" --journal "$JOURNAL" 2>/tmp/demo.err | python3 -m json.tool
-echo ""
-echo "  ON-CHAIN RESULT  ->  solvent: TRUE,  ratio: 122.72%  (12272 bps)"
-echo "  ...proven WITHOUT revealing a single balance."
-echo ""
-echo "  View it live:"
-echo "     Contract: https://stellar.expert/explorer/testnet/contract/$POR"
+echo "  Contract: https://stellar.expert/explorer/testnet/contract/$POR"
 echo "=================================================================="

@@ -1,142 +1,116 @@
-# Confidential Proof-of-Reserves on Stellar (RISC Zero + Soroban)
+# Compliant Confidential Proof-of-Reserves on Stellar (RISC Zero + Soroban)
 
-Prove an issuer is **solvent** — that total assets ≥ total liabilities — and verify
-that proof **on-chain in a Stellar smart contract**, *without revealing any individual
-balance*. Built for the **Stellar Hacks: Real-World ZK** hackathon.
+Prove an issuer is **solvent** (assets >= liabilities) and verify it **on-chain on
+Stellar** — *without revealing any individual balance* — with two compliance
+features that make it real-world ready:
 
-> TL;DR: a RISC Zero zkVM program crunches an issuer's private books off-chain and
-> emits a Groth16 proof. A Soroban contract verifies that proof on Stellar and records
-> "solvent at ratio X%, as of time T" — the numbers stay secret, the solvency is public
-> and cryptographically checked.
+- **Selective disclosure (view key):** the public sees only **"solvent ✓"**. The
+  exact collateralization ratio is **encrypted on-chain**; only an auditor holding
+  the view key can decrypt it. The zero-knowledge proof guarantees the ciphertext
+  encrypts the *true* computed ratio.
+- **Merkle inclusion proofs:** the proof commits a Merkle root over customer
+  liabilities, so **any customer can prove on-chain that their balance was counted**
+  in the solvency total. Tampered proofs are rejected.
 
-This is exactly the pattern major exchanges (e.g. Binance) use for proof-of-reserves —
-ZK on the private liability side, public on-chain assets — except here the proof is
-**verified by the chain itself**, which is what Stellar's Protocol 25/26 ZK host
-functions newly make affordable.
+Built for **Stellar Hacks: Real-World ZK**. This is the "compliant privacy" pattern
+the hackathon highlights as Stellar's sweet spot: prove the public fact, encrypt the
+sensitive detail, give regulators a key, and let everyone verify.
+
+> A note on honesty: a basic version (just a public ratio) is tagged `v1-working`.
+> This `main` branch is the upgraded compliant/confidential version.
 
 ---
 
 ## Why this matters
 
-When you hold money with a stablecoin issuer, exchange, or custodian, you trust they
-actually hold the assets to cover what they owe. When they don't (FTX, Celsius, Terra),
-people lose everything. "Proof of reserves" fixes this — but the naive version (publish
-every account) is a privacy disaster. ZK collapses the dilemma: **prove `assets ≥
-liabilities` while revealing only the boolean and a collateralization ratio.**
+When an exchange or stablecoin issuer holds your money, you trust they actually have
+it. When that trust breaks (FTX, Celsius), people lose everything. The naive fix —
+publishing everyone's balances — destroys privacy. ZK lets you prove solvency while
+revealing nothing; selective disclosure then gives auditors lawful visibility without
+exposing the public to private data. That mirrors how Binance's proof-of-reserves
+works (ZK on liabilities, public assets) — except here **Stellar itself verifies the
+proof**, which Protocol 25/26 ZK host functions newly make affordable.
 
 ## How the ZK is load-bearing
 
-The guest program ([`por/methods/guest/src/main.rs`](por/methods/guest/src/main.rs))
-does the one thing that makes this real:
+The guest ([`por/methods/guest/src/main.rs`](por/methods/guest/src/main.rs)) asserts:
 
 ```rust
 assert!(total_assets >= total_liabilities, "INSOLVENT");
 ```
 
-Because of that assertion, **a valid proof for this program can only exist if the issuer
-is solvent.** So the mere existence of a verifying proof, for the known program
-`image_id`, *is* the proof of solvency. The individual balances are private inputs that
-never leave the prover; only a ratio, a timestamp, an account count, and a liability
-commitment are committed to the public journal.
+A valid proof for this program's `image_id` can therefore only exist if the issuer is
+solvent. The guest then (1) builds a Merkle root over liabilities and (2) encrypts the
+ratio under the view key — committing `solvent`, `enc_ratio`, `merkle_root`, etc. to
+the public journal. Individual balances are private inputs that never leave the prover.
 
 ## Architecture
 
 ```
-  OFF-CHAIN (prover)                          ON-CHAIN (Stellar testnet)
-  ──────────────────                          ──────────────────────────
-  private: asset[], liability[]
-        │
-        ▼  RISC Zero zkVM
-  assert assets >= liabilities                ┌─ ProofOfReserves (our contract) ─┐
-  commit(ratio_bps, ts, n, commitment)        │  submit(seal, image_id, journal) │
-        │                                     │   • require image_id == ours     │
-        ▼  Groth16 wrap (STARK→SNARK)         │   • journal_digest = sha256(j)   │
-  seal / image_id / journal_digest  ───────►  │   • router.verify(...)  ◄────────┼─┐
-                                              │   • record solvent + ratio + emit│ │
-                                              └──────────────────────────────────┘ │
-                                                         │ cross-contract call      │
-                                              ┌──────────▼───────── Nethermind ─────▼─┐
-                                              │ VerifierRouter → EmergencyStop →       │
-                                              │ Groth16Verifier (BN254 pairing check)  │
-                                              └────────────────────────────────────────┘
+  OFF-CHAIN (prover)                         ON-CHAIN (Stellar testnet)
+  private: assets[], liabilities[], view_key
+        | RISC Zero zkVM
+  assert solvent; build merkle_root;         ProofOfReserves (our contract)
+  encrypt ratio; commit public journal        - require image_id == ours
+        | Groth16 wrap                         - sha256(journal); router.verify()
+  seal / image_id / journal  --------------->  - record solvent + enc_ratio + root
+                                               - verify_inclusion(leaf,index,path)
+                                                      | cross-contract verify()
+                                               Nethermind RISC Zero verifier stack
+                                               (Router -> Groth16Verifier, BN254)
+  off-chain tools:
+   - auditor_decrypt.py  (view key -> true ratio)
+   - merkle_proof.py     (customer inclusion proof)
 ```
-
-We reuse Nethermind's audited-pattern [stellar-risc0-verifier](https://github.com/NethermindEth/stellar-risc0-verifier)
-as the on-chain verifier stack, and add our own `ProofOfReserves` application contract
-on top.
 
 ## Live on Stellar Testnet
 
 | Component | Contract ID |
 |---|---|
-| **ProofOfReserves (this project)** | `CCULU6FRJBTG77ZZNEXWYMKMYGEDLLS6746V2ZCZZWT2RM2RHWY7DUGA` |
+| **ProofOfReserves v2** | `CBVV3KMSJA6JGMWHSODTMZVWQFVCHTHNWH3MVW5ARIJWWBJP2RHWE4KE` |
 | VerifierRouter | `CDZG66I3HWXFNZW7BKAZH2C4R5BZMCFVBXNVF4IDNRHDL3XYNS44W2Y5` |
 | Groth16Verifier | `CC3YPLTUQYRCA3MQDXIXCAXJAPLXJIHKP5OVRRLOCOGCVUSYSJ4YWJTB` |
-| EmergencyStop | `CBN3HEDZLSS2EZQGCGPHHFBHCGUPAJJZBCPECXMWV2JRG2RKF4NAFM4V` |
-| TimelockController | `CBBI5GUNLMY5X7M7DQEKMZ3SODYCMXUIVRIXE6UBY4B7W7S3YDGTNVHO` |
 
-- **Guest `image_id`:** `b1f63151fccf1d509a1722eec40e7e987a752975d4471a393ab8d9e65108439c`
-- **Verifier selector:** `73c457ba`
-- **Live `submit` tx (proof verified + solvency recorded):**
-  [`8ccabdf7…`](https://stellar.expert/explorer/testnet/tx/8ccabdf7124cbb3dfb9c73dd529697a8a9efb8ce7b5b7596b8fe3febd019824f)
+- Guest `image_id`: `79c3b2c1568d89550d7cf918d4764fbdaa43dc7da50b8cec67cb24ac59a949a4`
+- Live `submit` tx: [`4958b7f7…`](https://stellar.expert/explorer/testnet/tx/4958b7f7d78946df75a86cdd395d8a18e14d6ea9fe2677a76e0386461a6dcdfb)
+- Full address list: [DEPLOYMENTS.md](DEPLOYMENTS.md)
 
-The recorded on-chain attestation:
-
+What's stored on-chain after a successful submit:
 ```json
-{ "solvent": true, "ratio_bps": 12272, "n_accounts": 3,
-  "statement_ts": 1750000000, "journal_digest": "1b9efb5c…427a", "ledger": 3286724 }
+{ "solvent": true, "enc_ratio": 2805658215177317376,
+  "merkle_root": "64c92872...", "n_accounts": 3, "statement_ts": 1750000000 }
 ```
+Note `enc_ratio` is the **ciphertext** — the public never sees 122.72%; only the
+auditor's view key recovers it.
 
-`ratio_bps: 12272` = **122.72%** collateralization (assets 1,350,000 / liabilities 1,100,000),
-proven without revealing either total.
+## Run the demo
+
+```bash
+bash scripts/demo_fast.sh
+```
+It submits the proof (verifies on-chain), shows the public view, decrypts the ratio as
+an auditor, and proves a customer's inclusion on-chain. To regenerate the proof from
+scratch: `cd por && cargo run -p host`.
 
 ## Repo layout
 
 ```
-por/                          RISC Zero zkVM project
-  methods/guest/src/main.rs   the guest: sum, assert solvency, commit public journal
-  host/src/main.rs            host: generates the Groth16 proof, writes proof.txt
-contracts/proof-of-reserves/  our Soroban application contract
-  src/lib.rs                  init / submit / latest — verifies via the router
-scripts/run_demo.sh           end-to-end demo runner (build → prove → deploy → verify)
+por/                          RISC Zero zkVM (guest = solvency + merkle + encryption)
+contracts/proof-of-reserves/  Soroban contract (submit, verify_inclusion, selective disclosure)
+scripts/auditor_decrypt.py    auditor tool: view key -> true ratio
+scripts/merkle_proof.py       customer tool: Merkle inclusion proof
+scripts/demo_fast.sh          one-command end-to-end demo
 DEPLOYMENTS.md                all deployed addresses
 ```
 
-## Run it yourself
+## Honest notes / limitations
 
-Prereqs: Linux x86_64, Rust, RISC Zero (`rzup`), Stellar CLI, Docker (for Groth16),
-and a clone of the Nethermind verifier at `./verifier`. See [`scripts/run_demo.sh`](scripts/run_demo.sh).
-
-```bash
-# 1. Generate a Groth16 proof of reserves (private books -> proof.txt)
-cd por && cargo run -p host && cd ..
-
-# 2. Verify the proof directly against the deployed router (simulation)
-ROUTER=CDZG66I3HWXFNZW7BKAZH2C4R5BZMCFVBXNVF4IDNRHDL3XYNS44W2Y5
-stellar contract invoke --send=no --network testnet --source issuer --id $ROUTER -- \
-  verify --seal $(sed -n 1p por/proof.txt) \
-         --image_id $(sed -n 2p por/proof.txt) \
-         --journal $(sed -n 3p por/proof.txt)
-
-# 3. Full app flow: submit to ProofOfReserves, which verifies + records solvency
-POR=CCULU6FRJBTG77ZZNEXWYMKMYGEDLLS6746V2ZCZZWT2RM2RHWY7DUGA
-stellar contract invoke --network testnet --source issuer --id $POR -- \
-  submit --seal $(sed -n 1p por/proof.txt) \
-         --image_id $(sed -n 2p por/proof.txt) \
-         --journal $(cat por/journal.hex)
-```
-
-## Honest notes / limitations (work-in-progress)
-
-- **Demo data.** The issuer's books in [`por/host/src/main.rs`](por/host/src/main.rs)
-  are hardcoded demo values. In production these come from real account data.
-- **Input-truth anchor.** A ZK proof proves the *computation* was correct on *some*
-  input. Binding it to an issuer's *real, complete* books needs (a) public on-chain
-  asset addresses anyone can sum, (b) a Merkle root of liabilities so each customer can
-  verify their balance is included, and (c) signed attestations for off-chain reserves.
-  We commit a single `sha256` liability commitment as a placeholder; extending it to a
-  full Merkle tree for per-customer inclusion proofs is the clear next step.
-- **Snapshot, not continuous.** Proof-of-reserves is a point-in-time snapshot; a real
-  deployment runs frequent/randomized snapshots to resist window-dressing.
-- **Not audited.** The Nethermind verifier and this contract are unaudited; testnet only,
-  do not use with real assets.
+- **Demo data.** Issuer books in `por/host/src/main.rs` are hardcoded demo values.
+- **Input-truth anchor.** ZK proves the computation, not that the inputs are the
+  issuer's real books. Production needs: public on-chain asset addresses, the Merkle
+  root cross-checked against real customer attestations, and signed reserves for
+  off-chain assets. The Merkle inclusion here is the customer-side half of that.
+- **Simplified view-key crypto.** The ratio is encrypted with a sha256-keystream XOR
+  (a one-time pad keyed by `view_key || timestamp`). It demonstrates selective
+  disclosure cleanly; production would use authenticated encryption / a proper KEM.
+- **Snapshot, not continuous; not audited; testnet only.**
