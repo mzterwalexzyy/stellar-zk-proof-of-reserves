@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Confidential Proof-of-Reserves · Stellar</title>
+<style>
+  :root{--bg:#0b0e14;--card:#141925;--line:#243042;--txt:#e6edf3;--mut:#8b98a9;--acc:#f5c451;--grn:#3fb950;--red:#f85149;--blu:#58a6ff}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--txt);font:15px/1.5 ui-sans-serif,system-ui,Segoe UI,Roboto,sans-serif}
+  .wrap{max-width:1080px;margin:0 auto;padding:28px 18px 60px}
+  header h1{margin:0 0 4px;font-size:26px}
+  header p{margin:0;color:var(--mut)}
+  .live{display:inline-block;margin-top:10px;padding:4px 10px;border:1px solid var(--line);border-radius:20px;font-size:12px;color:var(--grn)}
+  .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-top:22px}
+  @media(max-width:880px){.grid{grid-template-columns:1fr}}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px}
+  .card h2{margin:0 0 2px;font-size:16px;display:flex;align-items:center;gap:8px}
+  .card .sub{color:var(--mut);font-size:12.5px;margin-bottom:14px;min-height:32px}
+  .row{display:flex;justify-content:space-between;gap:8px;padding:7px 0;border-bottom:1px dashed var(--line);font-size:13.5px}
+  .row:last-child{border-bottom:0}
+  .row b{color:var(--mut);font-weight:500}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;word-break:break-all}
+  .pill{font-weight:700}
+  .ok{color:var(--grn)} .bad{color:var(--red)} .enc{color:var(--acc)}
+  input,select{width:100%;background:#0d1220;border:1px solid var(--line);color:var(--txt);border-radius:8px;padding:9px;font-family:ui-monospace,monospace;font-size:12.5px;margin:6px 0}
+  button{width:100%;background:var(--acc);color:#1a1300;border:0;border-radius:8px;padding:10px;font-weight:700;cursor:pointer;margin-top:6px}
+  button.ghost{background:transparent;color:var(--blu);border:1px solid var(--line)}
+  .result{margin-top:12px;padding:11px;border-radius:8px;background:#0d1220;border:1px solid var(--line);font-size:14px;min-height:22px}
+  label{font-size:12.5px;color:var(--mut)}
+  a{color:var(--blu);text-decoration:none} a:hover{text-decoration:underline}
+  .foot{margin-top:22px;color:var(--mut);font-size:12.5px;text-align:center}
+  .chk{display:flex;align-items:center;gap:8px;margin:8px 0;font-size:13px;color:var(--mut)}
+  .chk input{width:auto;margin:0}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>🛡️ Confidential Proof-of-Reserves</h1>
+    <p>An issuer proves it's solvent on Stellar — without revealing any balance. Three views of the same on-chain proof.</p>
+    <span class="live">● Live on Stellar Testnet</span>
+  </header>
+
+  <div class="grid">
+    <!-- PUBLIC -->
+    <div class="card">
+      <h2>🌍 Public</h2>
+      <div class="sub">What anyone on-chain can see. Solvency is public; the exact ratio is encrypted.</div>
+      <div class="row"><b>Solvent</b><span id="p-solvent" class="pill ok">—</span></div>
+      <div class="row"><b>Ratio</b><span id="p-ratio" class="pill enc">🔒 ENCRYPTED</span></div>
+      <div class="row"><b>Accounts</b><span id="p-n">—</span></div>
+      <div class="row"><b>As of</b><span id="p-ts">—</span></div>
+      <div class="row"><b>Merkle root</b><span id="p-root" class="mono">—</span></div>
+      <div style="margin-top:12px"><a id="p-link" target="_blank">View contract on stellar.expert ↗</a></div>
+    </div>
+
+    <!-- AUDITOR -->
+    <div class="card">
+      <h2>🔑 Auditor</h2>
+      <div class="sub">A regulator with the view key can decrypt the true ratio. Nobody else can.</div>
+      <label>View key (hex)</label>
+      <input id="vk" value=""/>
+      <button onclick="decrypt()">Decrypt ratio</button>
+      <div class="result" id="a-out">—</div>
+      <div class="chk"><span>Tip: clear the key and try again — without it, you get garbage.</span></div>
+    </div>
+
+    <!-- CUSTOMER -->
+    <div class="card">
+      <h2>👤 Customer</h2>
+      <div class="sub">A customer proves their balance was counted in the solvency total (Merkle inclusion).</div>
+      <label>Your account</label>
+      <select id="acct">
+        <option value="0">Account #0 — balance 200,000</option>
+        <option value="1">Account #1 — balance 500,000</option>
+        <option value="2">Account #2 — balance 400,000</option>
+      </select>
+      <div class="chk"><input type="checkbox" id="tamper"/><label for="tamper">Tamper with my balance (should fail)</label></div>
+      <button onclick="prove()">Prove inclusion</button>
+      <div class="result" id="c-out">—</div>
+    </div>
+  </div>
+
+  <p class="foot">
+    Powered by a RISC Zero zk proof verified on-chain by a Soroban contract.
+    The ZK guarantees the encrypted ratio is the <em>true</em> computed ratio, and that every counted balance is in the Merkle root.
+  </p>
+</div>
+
+<script>
+// ---- real on-chain attestation (contract CBVV3KMS...), verifiable via the link above ----
+const CONTRACT = "CBVV3KMSJA6JGMWHSODTMZVWQFVCHTHNWH3MVW5ARIJWWBJP2RHWE4KE";
+const ONCHAIN = {
+  solvent: true,
+  enc_ratio: 2805658215177317376n,
+  statement_ts: 1750000000,
+  n_accounts: 3,
+  merkle_root: "64c9287234af6a7e7f066414a9d68d5688b2ea59a2ac2e711e76a9b66e989ea9"
+};
+const DEMO_VIEWKEY = "61756469742d766965772d6b65792d64656d6f2d303132333435363738392121";
+const BALANCES = [200000, 500000, 400000];
+
+// ---- helpers (mirror the guest/contract exactly) ----
+const hex = b => [...b].map(x=>x.toString(16).padStart(2,"0")).join("");
+const fromHex = h => new Uint8Array(h.match(/.{2}/g).map(x=>parseInt(x,16)));
+const u32le = n => { const b=new Uint8Array(4); new DataView(b.buffer).setUint32(0,n>>>0,true); return b; };
+const u64le = n => { const b=new Uint8Array(8); new DataView(b.buffer).setBigUint64(0,BigInt(n),true); return b; };
+const cat = (...a) => { const t=new Uint8Array(a.reduce((s,x)=>s+x.length,0)); let o=0; for(const x of a){t.set(x,o);o+=x.length;} return t; };
+async function sha256(b){ return new Uint8Array(await crypto.subtle.digest("SHA-256", b)); }
+const leaf = async (i,bal) => sha256(cat(u32le(i), u64le(bal)));
+
+// ---- render public panel ----
+document.getElementById("p-solvent").textContent = ONCHAIN.solvent ? "TRUE ✓" : "FALSE";
+document.getElementById("p-n").textContent = ONCHAIN.n_accounts;
+document.getElementById("p-ts").textContent = new Date(ONCHAIN.statement_ts*1000).toISOString().slice(0,10);
+document.getElementById("p-root").textContent = ONCHAIN.merkle_root.slice(0,20)+"…";
+document.getElementById("p-link").href = "https://stellar.expert/explorer/testnet/contract/"+CONTRACT;
+document.getElementById("vk").value = DEMO_VIEWKEY;
+
+// ---- auditor decrypt ----
+async function decrypt(){
+  const out = document.getElementById("a-out");
+  const vkHex = document.getElementById("vk").value.trim();
+  if(!/^[0-9a-fA-F]{64}$/.test(vkHex)){ out.innerHTML='<span class="bad">Need a 64-hex view key.</span>'; return; }
+  const ks = (await sha256(cat(fromHex(vkHex), u64le(ONCHAIN.statement_ts)))).slice(0,8);
+  const keystream = new DataView(ks.buffer).getBigUint64(0,true);
+  const ratio = ONCHAIN.enc_ratio ^ keystream;
+  const ok = vkHex.toLowerCase()===DEMO_VIEWKEY;
+  out.innerHTML = ok
+    ? '<span class="ok">ratio = '+ratio+' bps → <b>'+(Number(ratio)/100).toFixed(2)+'% collateralized</b></span>'
+    : '<span class="bad">wrong key → garbage: '+ratio+' bps</span>';
+}
+
+// ---- customer inclusion proof ----
+async function prove(){
+  const out = document.getElementById("c-out");
+  const idx = parseInt(document.getElementById("acct").value);
+  const tamper = document.getElementById("tamper").checked;
+  // build leaves
+  const leaves = [];
+  for(let i=0;i<BALANCES.length;i++) leaves.push(await leaf(i, BALANCES[i]));
+  // my leaf (optionally tampered)
+  let myLeaf = tamper ? await leaf(idx, BALANCES[idx]+1) : leaves[idx];
+  // walk to root collecting siblings, recompute
+  let level = leaves.slice(), target = idx, cur = myLeaf;
+  while(level.length>1){
+    const nx=[]; let used=false;
+    for(let i=0;i<level.length;i+=2){
+      const L=level[i], R=(i+1<level.length)?level[i+1]:level[i];
+      if(!used && (i===target-(target%2))){
+        const sib = (target%2===0)? R : L;
+        cur = (target%2===0)? await sha256(cat(cur,sib)) : await sha256(cat(sib,cur));
+        used=true;
+      }
+      nx.push(await sha256(cat(L,R)));
+    }
+    target=Math.floor(target/2); level=nx;
+  }
+  const got = hex(cur), match = got===ONCHAIN.merkle_root;
+  out.innerHTML = match
+    ? '<span class="ok">✓ Verified — your balance is counted in the proven reserves.</span>'
+    : '<span class="bad">✗ Not included — this balance is not in the attested root.</span>';
+}
+</script>
+</body>
+</html>
