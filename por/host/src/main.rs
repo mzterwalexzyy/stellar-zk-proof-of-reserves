@@ -1,22 +1,38 @@
-// Host: generates a Groth16 proof for the compliant confidential PoR guest and
-// shows the PUBLIC view (solvent only) vs the AUDITOR view (decrypted ratio).
+// Host: generates a Groth16 proof for the compliant confidential PoR guest.
+// Books can be overridden via env vars ASSETS / LIABILITIES (comma-separated)
+// to demo both the solvent and the insolvent (no-proof-possible) scenarios.
 use methods::{POR_GUEST_ELF, POR_GUEST_ID};
 use risc0_ethereum_contracts::encode_seal;
 use risc0_zkvm::{default_prover, ExecutorEnv, ProverOpts};
 use sha2::{Digest, Sha256};
 use std::fs;
 
+fn parse_vec(name: &str, default: &[u64]) -> Vec<u64> {
+    match std::env::var(name) {
+        Ok(s) => s
+            .split(',')
+            .map(|x| x.trim())
+            .filter(|x| !x.is_empty())
+            .map(|x| x.parse::<u64>().expect("values must be integers"))
+            .collect(),
+        Err(_) => default.to_vec(),
+    }
+}
+
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::filter::EnvFilter::from_default_env())
         .init();
 
-    // ---- DEMO confidential books (private to the issuer) ----
-    let assets: Vec<u64> = vec![400_000, 350_000, 600_000]; // 1,350,000
-    let liabilities: Vec<u64> = vec![200_000, 500_000, 400_000]; // 1,100,000
+    let assets = parse_vec("ASSETS", &[400_000, 350_000, 600_000]);
+    let liabilities = parse_vec("LIABILITIES", &[200_000, 500_000, 400_000]);
     let timestamp: u64 = 1_750_000_000;
-    // Demo view key — in production shared out-of-band with the auditor only.
     let view_key: [u8; 32] = *b"audit-view-key-demo-0123456789!!";
+
+    let ta: u128 = assets.iter().map(|&x| x as u128).sum();
+    let tl: u128 = liabilities.iter().map(|&x| x as u128).sum();
+    println!(">> Books: assets = {ta}, liabilities = {tl}");
+    println!(">> Proving solvency with Groth16 (zkVM + STARK->SNARK wrap)...");
 
     let env = ExecutorEnv::builder()
         .write(&assets).unwrap()
@@ -25,10 +41,25 @@ fn main() {
         .write(&view_key).unwrap()
         .build().unwrap();
 
-    println!(">> Proving solvency with Groth16 (zkVM + STARK->SNARK wrap)...");
     let prover = default_prover();
     let opts = ProverOpts::groth16();
-    let receipt = prover.prove_with_opts(env, POR_GUEST_ELF, &opts).unwrap().receipt;
+
+    // The guest asserts assets >= liabilities. If it doesn't hold, the guest
+    // panics during execution and NO proof can be produced.
+    let receipt = match prover.prove_with_opts(env, POR_GUEST_ELF, &opts) {
+        Ok(info) => info.receipt,
+        Err(e) => {
+            eprintln!("\n==================================================================");
+            eprintln!("  X  PROOF GENERATION FAILED -- ISSUER IS INSOLVENT");
+            eprintln!("==================================================================");
+            eprintln!("  assets ({ta}) < liabilities ({tl})");
+            eprintln!("  The guest asserted assets >= liabilities and it did NOT hold,");
+            eprintln!("  so NO valid proof exists. There is nothing to submit to Stellar.");
+            eprintln!("  (prover error: {e})");
+            eprintln!("==================================================================");
+            std::process::exit(1);
+        }
+    };
     receipt.verify(POR_GUEST_ID).unwrap();
 
     let seal = encode_seal(&receipt).unwrap();
@@ -45,15 +76,13 @@ fn main() {
     println!("  merkle_root:  {}", hex::encode(merkle_root));
     println!("  accounts:     {}", n_accounts);
 
-    // Auditor decrypts with the view key.
     let mut hk = Sha256::new();
     hk.update(view_key);
     hk.update(ts.to_le_bytes());
     let ks = hk.finalize();
     let mut kb = [0u8; 8];
     kb.copy_from_slice(&ks[0..8]);
-    let keystream = u64::from_le_bytes(kb);
-    let ratio = enc_ratio ^ keystream;
+    let ratio = enc_ratio ^ u64::from_le_bytes(kb);
     println!("\n--- AUDITOR (with view key) decrypts ---");
     println!("  ratio_bps:    {} ({:.2}%)", ratio, ratio as f64 / 100.0);
 
